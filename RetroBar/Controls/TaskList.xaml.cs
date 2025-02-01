@@ -2,6 +2,7 @@
 using ManagedShell.WindowsTasks;
 using RetroBar.Utilities;
 using System;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 
@@ -13,10 +14,12 @@ namespace RetroBar.Controls
     public partial class TaskList : UserControl
     {
         private bool isLoaded;
+        private bool isScrollable;
         private double DefaultButtonWidth;
         private double MinButtonWidth;
         private double TaskButtonLeftMargin;
         private double TaskButtonRightMargin;
+        private ICollectionView taskbarItems;
 
         public static DependencyProperty ButtonWidthProperty = DependencyProperty.Register("ButtonWidth", typeof(double), typeof(TaskList), new PropertyMetadata(new double()));
 
@@ -34,6 +37,14 @@ namespace RetroBar.Controls
             set { SetValue(TasksProperty, value); }
         }
 
+        public static DependencyProperty HostProperty = DependencyProperty.Register("Host", typeof(Taskbar), typeof(TaskList));
+
+        public Taskbar Host
+        {
+            get { return (Taskbar)GetValue(HostProperty); }
+            set { SetValue(HostProperty, value); }
+        }
+
         public TaskList()
         {
             InitializeComponent();
@@ -45,7 +56,7 @@ namespace RetroBar.Controls
             MinButtonWidth = Application.Current.FindResource("TaskButtonMinWidth") as double? ?? 0;
             Thickness buttonMargin;
 
-            if (Settings.Instance.Edge == (int)AppBarEdge.Left || Settings.Instance.Edge == (int)AppBarEdge.Right)
+            if (Settings.Instance.Edge == AppBarEdge.Left || Settings.Instance.Edge == AppBarEdge.Right)
             {
                 buttonMargin = Application.Current.FindResource("TaskButtonVerticalMargin") as Thickness? ?? new Thickness();
             }
@@ -62,19 +73,77 @@ namespace RetroBar.Controls
         {
             if (!isLoaded && Tasks != null)
             {
-                TasksList.ItemsSource = Tasks.GroupedWindows;
-                if (Tasks.GroupedWindows != null)
-                    Tasks.GroupedWindows.CollectionChanged += GroupedWindows_CollectionChanged;
-                
+                taskbarItems = Tasks.CreateGroupedWindowsCollection();
+                if (taskbarItems != null)
+                {
+                    taskbarItems.CollectionChanged += GroupedWindows_CollectionChanged;
+                    taskbarItems.Filter = Tasks_Filter;
+                }
+
+                TasksList.ItemsSource = taskbarItems;
+
+                Settings.Instance.PropertyChanged += Settings_PropertyChanged;
+
                 isLoaded = true;
             }
 
             SetStyles();
         }
 
+        private void Settings_PropertyChanged(object sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(Settings.MultiMonMode))
+            {
+                taskbarItems?.Refresh();
+            }
+            else if (e.PropertyName == nameof(Settings.ShowMultiMon))
+            {
+                if (Settings.Instance.MultiMonMode != MultiMonOption.AllTaskbars)
+                {
+                    taskbarItems?.Refresh();
+                }
+            }
+        }
+
+        private bool Tasks_Filter(object obj)
+        {
+            if (obj is ApplicationWindow window)
+            {
+                if (!window.ShowInTaskbar)
+                {
+                    return false;
+                }
+
+                if (!Settings.Instance.ShowMultiMon || Settings.Instance.MultiMonMode == MultiMonOption.AllTaskbars)
+                {
+                    return true;
+                }
+
+                if (Settings.Instance.MultiMonMode == MultiMonOption.SameAsWindowAndPrimary && Host.Screen.Primary)
+                {
+                    return true;
+                }
+
+                if (Host.Screen.Primary && !Host.windowManager.IsValidHMonitor(window.HMonitor))
+                {
+                    return true;
+                }
+
+                if (window.HMonitor != Host.Screen.HMonitor)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private void TaskList_OnUnloaded(object sender, RoutedEventArgs e)
         {
-            Tasks.GroupedWindows.CollectionChanged -= GroupedWindows_CollectionChanged;
+            if (taskbarItems != null)
+            {
+                taskbarItems.CollectionChanged -= GroupedWindows_CollectionChanged;
+            }
             isLoaded = false;
         }
 
@@ -90,28 +159,63 @@ namespace RetroBar.Controls
 
         private void SetTaskButtonWidth()
         {
-            if (Settings.Instance.Edge == (int)AppBarEdge.Left || Settings.Instance.Edge == (int)AppBarEdge.Right)
+            if (Host is null)
+                return; // The state is trashed, but presumably it's just a transition
+
+            if (Settings.Instance.Edge == AppBarEdge.Left || Settings.Instance.Edge == AppBarEdge.Right)
             {
                 ButtonWidth = ActualWidth;
+                SetScrollable(true); // while technically not always scrollable, we don't run into DPI-specific issues with it enabled while vertical
                 return;
             }
 
+            double height = ActualHeight;
+            int rows = Host.Rows;
+
+            int taskCount = TasksList.Items.Count;
             double margin = TaskButtonLeftMargin + TaskButtonRightMargin;
-            double maxWidth = TasksList.ActualWidth / TasksList.Items.Count;
+            double maxWidth = TasksList.ActualWidth * rows / (taskCount + (taskCount % rows));
             double defaultWidth = DefaultButtonWidth + margin;
             double minWidth = MinButtonWidth + margin;
 
             if (maxWidth > defaultWidth)
             {
-                ButtonWidth = DefaultButtonWidth;
+                ButtonWidth = defaultWidth;
+                SetScrollable(false);
             }
             else if (maxWidth < minWidth)
             {
-                ButtonWidth = Math.Ceiling(DefaultButtonWidth / 2);
+                ButtonWidth = Math.Ceiling(defaultWidth / 2);
+                SetScrollable(true);
             }
             else
             {
                 ButtonWidth = Math.Floor(maxWidth);
+                SetScrollable(false);
+            }
+        }
+
+        private void SetScrollable(bool canScroll)
+        {
+            if (canScroll == isScrollable) return;
+
+            if (canScroll)
+            {
+                TasksScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            }
+            else
+            {
+                TasksScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            }
+
+            isScrollable = canScroll;
+        }
+
+        private void TasksScrollViewer_PreviewMouseWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
+        {
+            if (!isScrollable)
+            {
+                e.Handled = true;
             }
         }
     }
