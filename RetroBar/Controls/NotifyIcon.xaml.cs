@@ -6,6 +6,7 @@ using System.Windows.Input;
 using ManagedShell.Common.Helpers;
 using ManagedShell.Interop;
 using ManagedShell.WindowsTray;
+using RetroBar.Extensions;
 using RetroBar.Utilities;
 
 namespace RetroBar.Controls
@@ -17,12 +18,6 @@ namespace RetroBar.Controls
     {
         private bool isLoaded;
         private ManagedShell.WindowsTray.NotifyIcon TrayIcon;
-
-        private const string HARDWARE_GUID = "7820ae78-23e3-4229-82c1-e41cb67d5b9c";
-        private const string MEETNOW_GUID = "7820ae83-23e3-4229-82c1-e41cb67d5b9c";
-        private const string NETWORK_GUID = "7820ae74-23e3-4229-82c1-e41cb67d5b9c";
-        private const string POWER_GUID = "7820ae75-23e3-4229-82c1-e41cb67d5b9c";
-        private const string VOLUME_GUID = "7820ae73-23e3-4229-82c1-e41cb67d5b9c";
 
         public static DependencyProperty HostProperty = DependencyProperty.Register("Host", typeof(Taskbar), typeof(NotifyIcon));
 
@@ -39,30 +34,25 @@ namespace RetroBar.Controls
 
         private void applyEffects()
         {
-            if (!EnvironmentHelper.IsWindows10OrBetter || TrayIcon == null)
+            if (TrayIcon == null || Settings.Instance.InvertIconsMode == InvertIconsOption.Never)
             {
                 return;
             }
 
-            string iconGuid = TrayIcon.GUID.ToString();
-
-            if (!(iconGuid == HARDWARE_GUID ||
-                iconGuid == MEETNOW_GUID ||
-                iconGuid == NETWORK_GUID ||
-                iconGuid == POWER_GUID ||
-                iconGuid == VOLUME_GUID))
+            if (!TrayIcon.CanInvert())
             {
                 return;
             }
 
             bool invertByTheme = Application.Current.FindResource("InvertSystemNotifyIcons") as bool? ?? false;
+            bool performInvert = invertByTheme || Settings.Instance.InvertIconsMode == InvertIconsOption.Always;
 
-            if (NotifyIconImage.Effect == null != invertByTheme)
+            if (NotifyIconImage.Effect == null != performInvert)
             {
                 return;
             }
 
-            if (invertByTheme)
+            if (performInvert)
             {
                 NotifyIconImage.Effect = new InvertEffect();
             }
@@ -90,7 +80,7 @@ namespace RetroBar.Controls
                 // If a notification was received before we started listening, it will be here. Show the first one that is not expired.
                 NotificationBalloon firstUnexpiredNotification = TrayIcon.MissedNotifications.FirstOrDefault(balloon => balloon.Received.AddMilliseconds(balloon.Timeout) > DateTime.Now);
 
-                if (firstUnexpiredNotification != null)
+                if (firstUnexpiredNotification != null && Host != null && Host.Screen.Primary)
                 {
                     BalloonControl.Show(firstUnexpiredNotification, NotifyIconBorder);
                     TrayIcon.MissedNotifications.Remove(firstUnexpiredNotification);
@@ -111,6 +101,16 @@ namespace RetroBar.Controls
 
         private void TrayIcon_NotificationBalloonShown(object sender, NotificationBalloonEventArgs e)
         {
+            if (Host == null || !Host.Screen.Primary)
+            {
+                return;
+            }
+
+            if (TrayIcon == null || TrayIcon.GetBehavior() == NotifyIconBehavior.AlwaysHide || TrayIcon.GetBehavior() == NotifyIconBehavior.Remove)
+            {
+                return;
+            }
+
             BalloonControl.Show(e.Balloon, NotifyIconBorder);
             e.Handled = true;
         }
@@ -160,7 +160,7 @@ namespace RetroBar.Controls
         {
             switch (TrayIcon?.GUID.ToString())
             {
-                case VOLUME_GUID:
+                case NotificationArea.VOLUME_GUID:
                     VolumeChanger.ChangeVolume(WindowHelper.FindWindowsTray(IntPtr.Zero), upOrDown);
                     return true;
                 default:

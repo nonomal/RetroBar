@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using ManagedShell.Common.Helpers;
 using ManagedShell.Interop;
@@ -18,6 +19,14 @@ namespace RetroBar.Controls
     /// </summary>
     public partial class TaskButton : UserControl
     {
+        public static DependencyProperty HostProperty = DependencyProperty.Register("Host", typeof(TaskList), typeof(TaskButton));
+
+        public TaskList Host
+        {
+            get { return (TaskList)GetValue(HostProperty); }
+            set { SetValue(HostProperty, value); }
+        }
+
         private ApplicationWindow Window;
         private TaskButtonStyleConverter StyleConverter = new TaskButtonStyleConverter();
         private ApplicationWindow.WindowState PressedWindowState = ApplicationWindow.WindowState.Inactive;
@@ -54,6 +63,25 @@ namespace RetroBar.Controls
             }
         }
 
+        private void Animate()
+        {
+            var ease = new SineEase();
+            ease.EasingMode = EasingMode.EaseInOut;
+
+            DoubleAnimation animation = new DoubleAnimation();
+            animation.From = 0;
+            animation.To = Host?.ButtonWidth ?? ActualWidth;
+            animation.Duration = new Duration(TimeSpan.FromMilliseconds(250));
+            animation.FillBehavior = FillBehavior.Stop;
+            animation.EasingFunction = ease;
+            Storyboard.SetTarget(animation, this);
+            Storyboard.SetTargetProperty(animation, new PropertyPath(WidthProperty));
+
+            Storyboard storyboard = new Storyboard();
+            storyboard.Children.Add(animation);
+            storyboard.Begin();
+        }
+
         private void TaskButton_OnLoaded(object sender, RoutedEventArgs e)
         {
             Window = DataContext as ApplicationWindow;
@@ -66,10 +94,32 @@ namespace RetroBar.Controls
 
             if (Window != null)
             {
+                Window.GetButtonRect += Window_GetButtonRect;
                 Window.PropertyChanged += Window_PropertyChanged;
             }
 
+            if (Settings.Instance.SlideTaskbarButtons && Host?.Host?.Orientation == Orientation.Horizontal)
+            {
+                Animate();
+            }
+
             _isLoaded = true;
+        }
+
+        private void Window_GetButtonRect(ref NativeMethods.ShortRect rect)
+        {
+            if (Host?.Host?.Screen.Primary != true && Settings.Instance.MultiMonMode != MultiMonOption.SameAsWindow)
+            {
+                // If there are multiple instances of a button, use the button on the primary display only
+                return;
+            }
+
+            Point buttonTopLeft = PointToScreen(new Point(0, 0));
+            Point buttonBottomRight = PointToScreen(new Point(ActualWidth, ActualHeight));
+            rect.Top = (short)buttonTopLeft.Y;
+            rect.Left = (short)buttonTopLeft.X;
+            rect.Bottom = (short)buttonBottomRight.Y;
+            rect.Right = (short)buttonBottomRight.X;
         }
 
         private void Window_PropertyChanged(object sender, PropertyChangedEventArgs e)
@@ -91,6 +141,7 @@ namespace RetroBar.Controls
 
             if (Window != null)
             {
+                Window.GetButtonRect -= Window_GetButtonRect;
                 Window.PropertyChanged -= Window_PropertyChanged;
             }
 
@@ -108,9 +159,9 @@ namespace RetroBar.Controls
             int ws = Window.WindowStyles;
 
             // disable window operations depending on current window state. originally tried implementing via bindings but found there is no notification we get regarding maximized state
-            MaximizeMenuItem.IsEnabled = (wss != NativeMethods.WindowShowStyle.ShowMaximized && (ws & (int)NativeMethods.WindowStyles.WS_MAXIMIZEBOX) != 0);
-            MinimizeMenuItem.IsEnabled = (wss != NativeMethods.WindowShowStyle.ShowMinimized && (ws & (int)NativeMethods.WindowStyles.WS_MINIMIZEBOX) != 0);
-            if (RestoreMenuItem.IsEnabled = (wss != NativeMethods.WindowShowStyle.ShowNormal))
+            MaximizeMenuItem.IsEnabled = wss != NativeMethods.WindowShowStyle.ShowMaximized && (ws & (int)NativeMethods.WindowStyles.WS_MAXIMIZEBOX) != 0;
+            MinimizeMenuItem.IsEnabled = wss != NativeMethods.WindowShowStyle.ShowMinimized && Window.CanMinimize;
+            if (RestoreMenuItem.IsEnabled = wss != NativeMethods.WindowShowStyle.ShowNormal)
             {
                 CloseMenuItem.FontWeight = FontWeights.Normal;
                 RestoreMenuItem.FontWeight = FontWeights.Bold;
@@ -121,7 +172,7 @@ namespace RetroBar.Controls
                 RestoreMenuItem.FontWeight = FontWeights.Normal;
             }
             MoveMenuItem.IsEnabled = wss == NativeMethods.WindowShowStyle.ShowNormal;
-            SizeMenuItem.IsEnabled = (wss == NativeMethods.WindowShowStyle.ShowNormal && (ws & (int)NativeMethods.WindowStyles.WS_MAXIMIZEBOX) != 0);
+            SizeMenuItem.IsEnabled = wss == NativeMethods.WindowShowStyle.ShowNormal && (ws & (int)NativeMethods.WindowStyles.WS_MAXIMIZEBOX) != 0;
         }
 
         private void CloseMenuItem_OnClick(object sender, RoutedEventArgs e)
@@ -156,7 +207,7 @@ namespace RetroBar.Controls
 
         private void AppButton_OnClick(object sender, RoutedEventArgs e)
         {
-            if (PressedWindowState == ApplicationWindow.WindowState.Active)
+            if (PressedWindowState == ApplicationWindow.WindowState.Active && Window?.CanMinimize == true)
             {
                 Window?.Minimize();
             }
@@ -178,18 +229,25 @@ namespace RetroBar.Controls
         {
             if (e.ChangedButton == MouseButton.Middle)
             {
-                if (Window == null)
+                if (Window == null || Settings.Instance.TaskMiddleClickAction == TaskMiddleClickOption.DoNothing)
                 {
                     return;
                 }
-
-                ShellHelper.StartProcess(Window.IsUWP ? "appx:" + Window.AppUserModelID : Window.WinFileName);
+                if (Settings.Instance.TaskMiddleClickAction == TaskMiddleClickOption.CloseTask !=
+                    (Keyboard.IsKeyDown(Key.LeftShift) || Keyboard.IsKeyDown(Key.RightShift)))
+                {
+                    Window?.Close();
+                }
+                else
+                {
+                    ShellHelper.StartProcess(Window.IsUWP ? "appx:" + Window.AppUserModelID : Window.WinFileName);
+                }
             }
         }
 
         private void Settings_PropertyChanged(object sender, PropertyChangedEventArgs e)
         {
-            if (e.PropertyName == "Theme")
+            if (e.PropertyName == nameof(Settings.Theme))
             {
                 SetStyle();
             }
@@ -228,5 +286,10 @@ namespace RetroBar.Controls
             }
         }
         #endregion
+
+        private void ContextMenu_OpenedOrClosed(object sender, RoutedEventArgs e)
+        {
+            BindingOperations.GetMultiBindingExpression(AppButton, StyleProperty).UpdateTarget();
+        }
     }
 }

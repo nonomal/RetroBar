@@ -1,4 +1,4 @@
-﻿using ManagedShell;
+using ManagedShell;
 using ManagedShell.AppBar;
 using ManagedShell.Common.Logging;
 using System;
@@ -9,17 +9,23 @@ namespace RetroBar.Utilities
 {
     public class WindowManager : IDisposable
     {
+        private static object reopenLock = new object();
+
         private bool _isSettingDisplays;
         private int _pendingDisplayEvents;
         private List<AppBarScreen> _screenState = new List<AppBarScreen>();
         private List<Taskbar> _taskbars = new List<Taskbar>();
 
+        private readonly DictionaryManager _dictionaryManager;
+        private readonly ExplorerMonitor _explorerMonitor;
         private readonly StartMenuMonitor _startMenuMonitor;
         private readonly ShellManager _shellManager;
         private readonly Updater _updater;
 
-        public WindowManager(ShellManager shellManager, StartMenuMonitor startMenuMonitor, Updater updater)
+        public WindowManager(DictionaryManager dictionaryManager, ExplorerMonitor explorerMonitor, ShellManager shellManager, StartMenuMonitor startMenuMonitor, Updater updater)
         {
+            _dictionaryManager = dictionaryManager;
+            _explorerMonitor = explorerMonitor;
             _shellManager = shellManager;
             _startMenuMonitor = startMenuMonitor;
             _updater = updater;
@@ -28,12 +34,14 @@ namespace RetroBar.Utilities
 
             openTaskbars();
 
+            _explorerMonitor.ExplorerMonitorStart(this);
+
             Settings.Instance.PropertyChanged += Settings_PropertyChanged;
         }
 
         private void Settings_PropertyChanged(object sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
-            if (e.PropertyName == "ShowMultiMon")
+            if (e.PropertyName == nameof(Settings.ShowMultiMon))
             {
                 // Update screen state in case it has changed since last checked
                 _screenState = AppBarScreen.FromAllScreens();
@@ -49,8 +57,11 @@ namespace RetroBar.Utilities
 
         public void ReopenTaskbars()
         {
-            closeTaskbars();
-            openTaskbars();
+            lock (reopenLock)
+            {
+                closeTaskbars();
+                openTaskbars();
+            }
         }
 
         public void NotifyDisplayChange(ScreenSetupReason reason)
@@ -90,6 +101,19 @@ namespace RetroBar.Utilities
             ShellLogger.Debug($"WindowManager: Finished processing display events");
         }
 
+        public bool IsValidHMonitor(IntPtr hMonitor)
+        {
+            foreach(var screen in _screenState)
+            {
+                if (screen.HMonitor == hMonitor)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private void closeTaskbars()
         {
             ShellLogger.Debug($"WindowManager: Closing all taskbars");
@@ -125,7 +149,7 @@ namespace RetroBar.Utilities
         private void openTaskbar(AppBarScreen screen)
         {
             ShellLogger.Debug($"WindowManager: Opening taskbar on screen {screen.DeviceName}");
-            Taskbar taskbar = new Taskbar(this, _shellManager, _startMenuMonitor, _updater, screen, (AppBarEdge)Settings.Instance.Edge);
+            Taskbar taskbar = new Taskbar(this, _dictionaryManager, _shellManager, _startMenuMonitor, _updater, screen, Settings.Instance.Edge, Settings.Instance.AutoHide ? AppBarMode.AutoHide : AppBarMode.Normal);
             taskbar.Show();
 
             _taskbars.Add(taskbar);
@@ -162,7 +186,10 @@ namespace RetroBar.Utilities
         private void resetScreenCache()
         {
             // use reflection to empty screens cache
-            typeof(Screen).GetField("screens", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic).SetValue(null, null);
+            const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+            var fi = typeof(Screen).GetField("screens", flags) ?? typeof(Screen).GetField("s_screens", flags)
+                ?? throw new Exception("Can't find & reset screens cache inside winforms");
+            fi.SetValue(null, null);
         }
 
         public void Dispose()
